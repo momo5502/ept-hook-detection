@@ -2,6 +2,9 @@
 
 #include <cstdint>
 #include <stdexcept>
+#include <thread>
+#include <vector>
+#include <atomic>
 
 #include <Windows.h>
 
@@ -58,7 +61,7 @@ bool ept_hook_write_check(void* pointer_in_page)
 		throw std::runtime_error("No double cc in page");
 	}
 
-	if(!execute_throws(pointer))
+	if (!execute_throws(pointer))
 	{
 		// We read CC but did not throw? Probably already hooked?
 		// Or exception handling is broken.
@@ -66,10 +69,43 @@ bool ept_hook_write_check(void* pointer_in_page)
 	}
 
 	write_byte(pointer, 0xC3);
-	const bool did_throw =  execute_throws(pointer);
+
+	const auto did_throw = execute_throws(pointer);
+	if (did_throw)
+	{
+		return true;
+	}
+
+	// If it did not throw, try detecting using multiple cores
+	const auto thread_count = std::thread::hardware_concurrency();
+	std::vector<std::thread> threads{};
+	threads.resize(thread_count);
+
+	std::atomic_bool did_anyone_throw{false};
+
+	for (auto& t : threads)
+	{
+		t = std::thread([&did_anyone_throw, pointer]
+		{
+			const auto did_throw = execute_throws(pointer);
+			if(did_throw)
+			{
+				did_anyone_throw = true;
+			}
+		});
+	}
+
+	for (auto& t : threads)
+	{
+		if (t.joinable())
+		{
+			t.join();
+		}
+	}
+
 	write_byte(pointer, 0xCC);
 
 	// If we still did throw even though we wrote C3,
 	// it's certain that a hook is installed.
-	return did_throw;
+	return did_anyone_throw;
 }
